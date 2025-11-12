@@ -1,0 +1,514 @@
+# Creating Merapick Pro v7 project files and zipping them for download.
+# This will recreate the same project structure and produce /mnt/data/merapick_v7.zip
+import os, zipfile, textwrap
+
+base = '/mnt/data/merapick_v7/src'
+os.makedirs(base, exist_ok=True)
+
+files = {
+  "utils/firebaseConfig.js": """export const firebaseConfig = {
+  // <-- REPLACE WITH YOUR FIREBASE CONFIG -->
+  apiKey: 'YOUR_API_KEY',
+  authDomain: 'YOUR_AUTH_DOMAIN',
+  projectId: 'YOUR_PROJECT_ID',
+  storageBucket: 'YOUR_STORAGE_BUCKET',
+  messagingSenderId: 'YOUR_MESSAGING_SENDER_ID',
+  appId: 'YOUR_APP_ID',
+};""",
+  "utils/haversine.js": """export default function haversineKm(a, b) {
+  const R = 6371; // km
+  const toRad = (v) => (v * Math.PI) / 180;
+  const dLat = toRad(b.latitude - a.latitude);
+  const dLon = toRad(b.longitude - a.longitude);
+  const lat1 = toRad(a.latitude);
+  const lat2 = toRad(b.latitude);
+  const sinDLat = Math.sin(dLat / 2) * Math.sin(dLat / 2);
+  const sinDLon = Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const x = sinDLat + Math.cos(lat1) * Math.cos(lat2) * sinDLon;
+  const c = 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
+  return R * c;
+}""",
+  "context/ProductContext.js": """import React, { createContext, useState, useEffect } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import firestore from '@react-native-firebase/firestore';
+import auth from '@react-native-firebase/auth';
+import storage from '@react-native-firebase/storage';
+import * as Location from 'expo-location';
+
+export const ProductContext = createContext();
+
+export const ProductProvider = ({ children }) => {
+  const [products, setProducts] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [user, setUser] = useState(null);
+  const [initializing, setInitializing] = useState(true);
+  const [userLocation, setUserLocation] = useState(null);
+
+  useEffect(() => {
+    const unsubAuth = auth().onAuthStateChanged((u) => {
+      setUser(u);
+      setInitializing(false);
+    });
+    return () => unsubAuth();
+  }, []);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status === 'granted') {
+          const loc = await Location.getCurrentPositionAsync({});
+          setUserLocation(loc.coords);
+        }
+      } catch (e) {
+        // ignore location failure; consumers must handle null
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    const cacheKey = 'products_cache_v2';
+
+    const unsub = firestore()
+      .collection('products')
+      .orderBy('createdAt', 'desc')
+      .onSnapshot(async (snapshot) => {
+        const list = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+        setProducts(list);
+        setLoading(false);
+        try {
+          await AsyncStorage.setItem(cacheKey, JSON.stringify(list));
+        } catch (e) {
+          // ignore cache failure
+        }
+      }, (err) => {
+        (async () => {
+          try {
+            const cached = await AsyncStorage.getItem(cacheKey);
+            if (cached) setProducts(JSON.parse(cached));
+            setLoading(false);
+          } catch (e) {}
+        })();
+      });
+
+    return () => unsub();
+  }, []);
+
+  const uploadFile = async (uri, path = 'products') => {
+    if (!uri) return null;
+    if (uri.startsWith('http')) return uri;
+    const filename = uri.substring(uri.lastIndexOf('/') + 1);
+    const ref = storage().ref(`${path}/${Date.now()}_${filename}`);
+    await ref.putFile(uri);
+    return await ref.getDownloadURL();
+  };
+
+  const batchDelete = async (ids = []) => {
+    if (!ids.length) return;
+    const batch = firestore().batch();
+    ids.forEach(id => batch.delete(firestore().collection('products').doc(id)));
+    await batch.commit();
+  };
+
+  return (
+    <ProductContext.Provider value={{ products, loading, user, uploadFile, userLocation, initializing, batchDelete }}>
+      {children}
+    </ProductContext.Provider>
+  );
+};""",
+  "screens/AuthScreen.js": """import React, { useState } from 'react';
+import { View, TextInput, TouchableOpacity, Text, StyleSheet, Alert } from 'react-native';
+import auth from '@react-native-firebase/auth';
+
+export default function AuthScreen() {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const signUp = async () => {
+    if (!email || !password) return Alert.alert('Error', 'Enter email & password');
+    setLoading(true);
+    try { await auth().createUserWithEmailAndPassword(email, password); }
+    catch (e) { Alert.alert('Sign up error', e.message); }
+    finally { setLoading(false); }
+  };
+
+  const signIn = async () => {
+    if (!email || !password) return Alert.alert('Error', 'Enter email & password');
+    setLoading(true);
+    try { await auth().signInWithEmailAndPassword(email, password); }
+    catch (e) { Alert.alert('Sign in error', e.message); }
+    finally { setLoading(false); }
+  };
+
+  const signInAnon = async () => {
+    setLoading(true);
+    try { await auth().signInAnonymously(); }
+    catch (e) { Alert.alert('Error', e.message);} finally { setLoading(false); }
+  };
+
+  return (
+    <View style={styles.container}>
+      <TextInput placeholder="Email" value={email} onChangeText={setEmail} style={styles.input} autoCapitalize='none' />
+      <TextInput placeholder="Password" value={password} onChangeText={setPassword} secureTextEntry style={styles.input} />
+      <TouchableOpacity onPress={signIn} style={styles.btn}><Text style={styles.btnText}>Sign In</Text></TouchableOpacity>
+      <TouchableOpacity onPress={signUp} style={[styles.btn, { backgroundColor: '#28a745' }]}><Text style={styles.btnText}>Sign Up</Text></TouchableOpacity>
+      <TouchableOpacity onPress={signInAnon} style={[styles.btn, { backgroundColor: '#6c757d' }]}><Text style={styles.btnText}>Continue as Guest</Text></TouchableOpacity>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({ container: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 }, input: { width: '100%', borderWidth: 1, borderColor: '#ccc', borderRadius: 8, padding: 12, marginBottom: 12 }, btn: { width: '100%', padding: 12, backgroundColor: '#007bff', borderRadius: 8, marginBottom: 8 }, btnText: { color: '#fff', textAlign: 'center', fontWeight: '600' } });""",
+  "screens/ProfileScreen.js": """import React, { useContext, useState, useEffect } from 'react';
+import { View, Text, TouchableOpacity, TextInput, Alert, StyleSheet, Platform, ToastAndroid } from 'react-native';
+import auth from '@react-native-firebase/auth';
+import firestore from '@react-native-firebase/firestore';
+import { ProductContext } from '../context/ProductContext';
+
+export default function ProfileScreen() {
+  const { user } = useContext(ProductContext);
+  const [displayName, setDisplayName] = useState('');
+  const [role, setRole] = useState('Vendor');
+
+  useEffect(() => {
+    if (user) {
+      const id = user.uid;
+      const ref = firestore().collection('users').doc(id);
+      ref.get().then(doc => {
+        if (doc.exists) {
+          const data = doc.data();
+          setDisplayName(data.name || '');
+          setRole(data.role || 'Vendor');
+        }
+      });
+    }
+  }, [user]);
+
+  const save = async () => {
+    if (!user) return Alert.alert('Not signed in');
+    try {
+      await firestore().collection('users').doc(user.uid).set({ name: displayName, role }, { merge: true });
+      if (Platform.OS === 'android') ToastAndroid.show('Profile saved', ToastAndroid.SHORT);
+      else Alert.alert('Saved', 'Profile updated');
+    } catch (e) { Alert.alert('Error', e.message); }
+  };
+
+  const signOut = async () => { await auth().signOut(); };
+
+  return (
+    <View style={styles.container}>
+      <Text style={{ fontWeight: '700', fontSize: 18, marginBottom: 12 }}>Profile</Text>
+      <TextInput placeholder="Name" value={displayName} onChangeText={setDisplayName} style={styles.input} />
+      <TextInput placeholder="Role (Buyer/Vendor/Farmer)" value={role} onChangeText={setRole} style={styles.input} />
+      <TouchableOpacity onPress={save} style={styles.btn}><Text style={styles.btnText}>Save</Text></TouchableOpacity>
+      <TouchableOpacity onPress={signOut} style={[styles.btn, { backgroundColor: '#dc3545' }]}><Text style={styles.btnText}>Sign Out</Text></TouchableOpacity>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({ container: { flex: 1, padding: 20 }, input: { borderWidth: 1, borderColor: '#ccc', borderRadius: 8, padding: 12, marginBottom: 12 }, btn: { padding: 12, backgroundColor: '#007bff', borderRadius: 8 }, btnText: { color: '#fff', textAlign: 'center' } });""",
+  "screens/AddEditScreen.js": """import React, { useState, useContext, useEffect } from 'react';
+import { ScrollView, TextInput, TouchableOpacity, Text, Image, ActivityIndicator, Alert, StyleSheet, View, Platform, ToastAndroid } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
+import firestore from '@react-native-firebase/firestore';
+import { ProductContext } from '../context/ProductContext';
+import * as Location from 'expo-location';
+
+export default function AddEditScreen({ navigation, route }) {
+  const product = route?.params?.product;
+  const mode = route?.params?.mode || (product ? 'edit' : 'add');
+  const { uploadFile, user } = useContext(ProductContext);
+  const [name, setName] = useState(product?.name || '');
+  const [price, setPrice] = useState(product?.price?.toString() || '');
+  const [unit, setUnit] = useState(product?.unit || 'kg');
+  const [seller, setSeller] = useState(product?.seller || (user ? user.email || 'me' : ''));
+  const [img, setImg] = useState(product?.img || null);
+  const [uploading, setUploading] = useState(false);
+  const [location, setLocation] = useState(product?.latitude && product?.longitude ? { latitude: product.latitude, longitude: product.longitude } : null);
+
+  useEffect(() => {
+    (async () => {
+      if (!location) {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status === 'granted') {
+          const loc = await Location.getCurrentPositionAsync({});
+          setLocation(loc.coords);
+        }
+      }
+    })();
+  }, []);
+
+  const canEdit = !product || (user && product.userId === user.uid) || (product && !product.userId);
+
+  const pickImage = async () => {
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.7 });
+    if (!result.canceled) setImg(result.assets[0].uri);
+  };
+
+  const handleSave = async () => {
+    if (!name || !price || !img || !seller) return Alert.alert('Error', 'Please fill all fields');
+    if (!canEdit) return Alert.alert('Unauthorized', 'You can only edit your own products');
+    setUploading(true);
+    try {
+      const imageUrl = img.startsWith('http') ? img : await uploadFile(img);
+      const data = {
+        name,
+        price: parseFloat(price),
+        unit,
+        seller,
+        img: imageUrl,
+        latitude: location?.latitude || null,
+        longitude: location?.longitude || null,
+        userId: user?.uid || null,
+        createdAt: firestore.FieldValue.serverTimestamp(),
+      };
+      if (product && mode === 'edit') {
+        await firestore().collection('products').doc(product.id).update(data);
+        if (Platform.OS === 'android') ToastAndroid.show('Updated', ToastAndroid.SHORT);
+        else Alert.alert('Updated', 'Product updated');
+      } else {
+        await firestore().collection('products').add(data);
+        if (Platform.OS === 'android') ToastAndroid.show('Added', ToastAndroid.SHORT);
+        else Alert.alert('Added', 'Product added');
+      }
+      navigation.goBack();
+    } catch (e) {
+      Alert.alert('Error', e.message);
+    } finally { setUploading(false); }
+  };
+
+  return (
+    <ScrollView contentContainerStyle={styles.form}>
+      <TextInput placeholder="Product name" value={name} onChangeText={setName} style={styles.input} />
+      <TextInput placeholder="Price" value={price} onChangeText={setPrice} keyboardType="numeric" style={styles.input} />
+      <TextInput placeholder="Unit (kg/piece)" value={unit} onChangeText={setUnit} style={styles.input} />
+      <TextInput placeholder="Seller name" value={seller} onChangeText={setSeller} style={styles.input} />
+      <TouchableOpacity onPress={pickImage} style={styles.imgPicker}>
+        {img ? <Image source={{ uri: img }} style={{ width: 180, height: 180, borderRadius: 10 }} /> : <Text>Select Image</Text>}
+      </TouchableOpacity>
+      <TouchableOpacity onPress={handleSave} style={styles.saveBtn} disabled={uploading || !canEdit}>{uploading ? <ActivityIndicator color="#fff" /> : <Text style={styles.btnText}>{product ? 'Update Product' : 'Add Product'}</Text>}</TouchableOpacity>
+      {!canEdit && <Text style={{ color: '#d00', marginTop: 8 }}>You are not the owner of this product.</Text>}
+    </ScrollView>
+  );
+}
+
+const styles = StyleSheet.create({ form: { padding: 20, alignItems: 'center' }, input: { borderWidth: 1, borderColor: '#ccc', borderRadius: 8, padding: 10, width: '100%', marginBottom: 10, backgroundColor: '#fff' }, imgPicker: { width: 180, height: 180, borderRadius: 10, backgroundColor: '#eee', justifyContent: 'center', alignItems: 'center', marginBottom: 15 }, saveBtn: { backgroundColor: '#007bff', padding: 15, borderRadius: 10, width: '100%', alignItems: 'center' }, btnText: { color: '#fff' } });""",
+  "screens/MapScreen.js": """import React, { useEffect, useState, useContext } from 'react';
+import { View, ActivityIndicator, Image, Text } from 'react-native';
+import MapView, { Marker, Callout } from 'react-native-maps';
+import * as Location from 'expo-location';
+import { ProductContext } from '../context/ProductContext';
+import haversineKm from '../utils/haversine';
+
+export default function MapScreen({ navigation }) {
+  const { products, loading, userLocation } = useContext(ProductContext);
+  const [location, setLocation] = useState(userLocation);
+
+  useEffect(() => {
+    (async () => {
+      if (!location) {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status === 'granted') {
+          const loc = await Location.getCurrentPositionAsync({});
+          setLocation(loc.coords);
+        }
+      }
+    })();
+  }, []);
+
+  if (loading || !location) return (<View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}><ActivityIndicator size="large" /></View>);
+
+  return (
+    <MapView style={{ flex: 1 }} initialRegion={{ latitude: location.latitude, longitude: location.longitude, latitudeDelta: 0.1, longitudeDelta: 0.1 }}>
+      {products.map(p => p.latitude && p.longitude ? (
+        <Marker key={p.id} coordinate={{ latitude: p.latitude, longitude: p.longitude }}>
+          <View style={{ width: 60, height: 60, borderRadius: 30, overflow: 'hidden', borderWidth: 2, borderColor: '#fff' }}>
+            <Image source={{ uri: p.img }} style={{ width: 60, height: 60 }} />
+          </View>
+          <Callout onPress={() => navigation.navigate('Merapick', { product: p, mode: 'edit' })}>
+            <View style={{ width: 200 }}>
+              <Image source={{ uri: p.img }} style={{ width: 180, height: 100, borderRadius: 8 }} />
+              <View style={{ paddingTop: 6 }}>
+                <Text numberOfLines={1} style={{ fontWeight: '700' }}>{p.name}</Text>
+                <Text>₹{p.price} {p.unit}</Text>
+                <Text numberOfLines={1}>{p.seller}</Text>
+                <Text style={{ color: '#007bff', marginTop: 4 }}>Tap to open</Text>
+              </View>
+            </View>
+          </Callout>
+        </Marker>
+      ) : null)}
+    </MapView>
+  );
+}""",
+  "screens/HomeScreen.js": """import React, { useContext, useEffect, useState, useMemo } from 'react';
+import { View, Text, TextInput, TouchableOpacity, ScrollView, Image, Alert, StyleSheet, ActivityIndicator, Platform, ToastAndroid } from 'react-native';
+import { ProductContext } from '../context/ProductContext';
+import haversineKm from '../utils/haversine';
+import firestore from '@react-native-firebase/firestore';
+
+export default function HomeScreen({ navigation }) {
+  const { products, loading, user, userLocation, batchDelete } = useContext(ProductContext);
+  const [search, setSearch] = useState('');
+  const [unitFilter, setUnitFilter] = useState('all');
+  const [priceRange, setPriceRange] = useState([0, 10000]);
+  const [sortBy, setSortBy] = useState('recent'); // recent | distance | priceAsc | priceDesc
+  const [selected, setSelected] = useState([]); // ids for batch
+  const [myOnly, setMyOnly] = useState(false);
+
+  const filtered = useMemo(() => {
+    const lower = search.toLowerCase();
+    let list = products.filter(p => (p.name?.toLowerCase().includes(lower) || p.seller?.toLowerCase().includes(lower)));
+    if (unitFilter !== 'all') list = list.filter(p => (p.unit === unitFilter));
+    list = list.filter(p => (p.price >= priceRange[0] && p.price <= priceRange[1]));
+    if (myOnly && user) list = list.filter(p => p.userId === user.uid);
+
+    if (sortBy === 'priceAsc') list.sort((a,b) => a.price - b.price);
+    else if (sortBy === 'priceDesc') list.sort((a,b) => b.price - a.price);
+    else if (sortBy === 'distance') {
+      if (userLocation) {
+        list.sort((a,b) => {
+          const da = a.latitude ? haversineKm(userLocation, { latitude: a.latitude, longitude: a.longitude }) : Infinity;
+          const db = b.latitude ? haversineKm(userLocation, { latitude: b.latitude, longitude: b.longitude }) : Infinity;
+          return da - db;
+        });
+      }
+    }
+    return list;
+  }, [products, search, unitFilter, priceRange, sortBy, myOnly, user, userLocation]);
+
+  const toggleSelect = (id) => { setSelected(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]); };
+
+  const handleBatchDelete = async () => {
+    if (selected.length === 0) return Alert.alert('No selection', 'Select products to delete');
+    Alert.alert('Confirm', `Delete ${selected.length} items?`, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Delete', style: 'destructive', onPress: async () => {
+        try { await batchDelete(selected); setSelected([]); if (Platform.OS === 'android') ToastAndroid.show('Deleted', ToastAndroid.SHORT); else Alert.alert('Deleted'); }
+        catch (e) { Alert.alert('Error', e.message); }
+      }}
+    ]);
+  };
+
+  if (loading) return (<View style={styles.center}><ActivityIndicator size="large" /></View>);
+
+  return (
+    <View style={{ flex: 1, backgroundColor: '#f9f9f9', paddingTop: 30 }}>
+      <View style={styles.searchRow}>
+        <TextInput placeholder="Search..." value={search} onChangeText={setSearch} style={styles.searchInput} />
+        <TouchableOpacity style={styles.addBtn} onPress={() => navigation.navigate('Merapick', { mode: 'add' })}><Text style={{ color: '#fff' }}>Add</Text></TouchableOpacity>
+      </View>
+
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ paddingHorizontal: 10, marginTop: 10 }}>
+        <TouchableOpacity onPress={() => setUnitFilter('all')} style={styles.filterBtn}><Text>All Units</Text></TouchableOpacity>
+        <TouchableOpacity onPress={() => setUnitFilter('kg')} style={styles.filterBtn}><Text>kg</Text></TouchableOpacity>
+        <TouchableOpacity onPress={() => setUnitFilter('piece')} style={styles.filterBtn}><Text>piece</Text></TouchableOpacity>
+        <TouchableOpacity onPress={() => setUnitFilter('litre')} style={styles.filterBtn}><Text>litre</Text></TouchableOpacity>
+        <TouchableOpacity onPress={() => setSortBy('recent')} style={styles.filterBtn}><Text>Recent</Text></TouchableOpacity>
+        <TouchableOpacity onPress={() => setSortBy('distance')} style={styles.filterBtn}><Text>Distance</Text></TouchableOpacity>
+        <TouchableOpacity onPress={() => setSortBy('priceAsc')} style={styles.filterBtn}><Text>Price ↑</Text></TouchableOpacity>
+        <TouchableOpacity onPress={() => setSortBy('priceDesc')} style={styles.filterBtn}><Text>Price ↓</Text></TouchableOpacity>
+        <TouchableOpacity onPress={() => setMyOnly(prev => !prev)} style={[styles.filterBtn, myOnly && { backgroundColor: '#d1ecf1' }]}><Text>My Items</Text></TouchableOpacity>
+      </ScrollView>
+
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between', padding: 10 }}>
+        <Text>{selected.length} selected</Text>
+        <View style={{ flexDirection: 'row' }}>
+          <TouchableOpacity onPress={() => setSelected([])} style={[styles.smallBtn, { marginRight: 8 }]}><Text>Clear</Text></TouchableOpacity>
+          <TouchableOpacity onPress={handleBatchDelete} style={[styles.smallBtn, { backgroundColor: '#dc3545' }]}><Text style={{ color: '#fff' }}>Delete</Text></TouchableOpacity>
+        </View>
+      </View>
+
+      <ScrollView>
+        {filtered.map(p => (
+          <TouchableOpacity key={p.id} onLongPress={() => toggleSelect(p.id)} onPress={() => navigation.navigate('Merapick', { product: p, mode: 'edit' })} style={[styles.card, selected.includes(p.id) && { borderWidth: 2, borderColor: '#007bff' }]}>
+            <Image source={{ uri: p.img }} style={styles.img} />
+            <View style={{ flex: 1, marginLeft: 10 }}>
+              <Text style={styles.title}>{p.name} <Text style={{ fontSize: 12, color: '#666' }}>({p.variety || 'N/A'})</Text></Text>
+              <Text>₹{p.price} / {p.unit}</Text>
+              <Text style={{ color: '#555' }}>{p.seller}</Text>
+              <Text style={{ color: '#999', marginTop: 6 }}>{p.createdAt?.toDate?.().toLocaleString?.() || ''}</Text>
+              {userLocation && p.latitude && p.longitude && <Text style={{ color: '#666', marginTop: 4 }}>{Math.round(haversineKm(userLocation, { latitude: p.latitude, longitude: p.longitude })*100)/100} km</Text>}
+            </View>
+          </TouchableOpacity>
+        ))}
+      </ScrollView>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({ center: { flex: 1, justifyContent: 'center', alignItems: 'center' }, searchRow: { flexDirection: 'row', paddingHorizontal: 10, alignItems: 'center' }, searchInput: { flex: 1, borderWidth: 1, borderColor: '#ddd', borderRadius: 8, padding: 10, backgroundColor: '#fff' }, addBtn: { backgroundColor: '#007bff', padding: 10, borderRadius: 8, marginLeft: 8 }, filterBtn: { padding: 8, borderRadius: 8, borderWidth: 1, borderColor: '#eee', marginRight: 8, backgroundColor: '#fff' }, card: { flexDirection: 'row', backgroundColor: '#fff', marginHorizontal: 10, marginBottom: 12, padding: 10, borderRadius: 8, elevation: 2 }, img: { width: 120, height: 90, borderRadius: 8 }, title: { fontWeight: '700', fontSize: 16 } , smallBtn: { padding: 8, borderRadius: 8, borderWidth: 1, borderColor: '#ccc' }});""",
+  "App.js": """import React from 'react';
+import { NavigationContainer } from '@react-navigation/native';
+import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
+import { createStackNavigator } from '@react-navigation/stack';
+import { ProductProvider } from './context/ProductContext';
+import HomeScreen from './screens/HomeScreen';
+import MapScreen from './screens/MapScreen';
+import AddEditScreen from './screens/AddEditScreen';
+import ProfileScreen from './screens/ProfileScreen';
+import AuthScreen from './screens/AuthScreen';
+import { Ionicons } from '@expo/vector-icons';
+import { useContext } from 'react';
+import { View, ActivityIndicator } from 'react-native';
+import { ProductContext } from './context/ProductContext';
+
+const Tab = createBottomTabNavigator();
+const Stack = createStackNavigator();
+
+function MainTabs() {
+  return (
+    <Tab.Navigator screenOptions={{ headerShown: false }}>
+      <Tab.Screen name="Home" component={HomeScreen} options={{ tabBarIcon: ({ color, size }) => <Ionicons name="home" size={size} color={color} /> }} />
+      <Tab.Screen name="Map" component={MapScreen} options={{ tabBarIcon: ({ color, size }) => <Ionicons name="map" size={size} color={color} /> }} />
+      <Tab.Screen name="Merapick" component={AddEditScreen} options={{ tabBarIcon: ({ color, size }) => <Ionicons name="add" size={size} color={color} /> }} />
+      <Tab.Screen name="Profile" component={ProfileScreen} options={{ tabBarIcon: ({ color, size }) => <Ionicons name="person" size={size} color={color} /> }} />
+    </Tab.Navigator>
+  );
+}
+
+export default function App() {
+  return (
+    <ProductProvider>
+      <NavigationContainer>
+        <RootNavigator />
+      </NavigationContainer>
+    </ProductProvider>
+  );
+}
+
+function RootNavigator() {
+  const { user, initializing } = useContext(ProductContext);
+
+  if (initializing) return (<View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}><ActivityIndicator size="large" /></View>);
+
+  return (
+    <Stack.Navigator screenOptions={{ headerShown: false }}>
+      {user ? (
+        <Stack.Screen name="Main" component={MainTabs} />
+      ) : (
+        <Stack.Screen name="Auth" component={AuthScreen} />
+      )}
+    </Stack.Navigator>
+  );
+}"""
+}
+
+# write files
+for path, content in files.items():
+    full = os.path.join('/mnt/data/merapick_v7', 'src', path)
+    os.makedirs(os.path.dirname(full), exist_ok=True)
+    with open(full, 'w', encoding='utf-8') as f:
+        f.write(content)
+
+# create zip
+zip_path = '/mnt/data/merapick_v7.zip'
+with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+    for root, _, filenames in os.walk('/mnt/data/merapick_v7'):
+        for fn in filenames:
+            filepath = os.path.join(root, fn)
+            arcname = os.path.relpath(filepath, '/mnt/data/merapick_v7')
+            zf.write(filepath, arcname)
+
+zip_path
+
